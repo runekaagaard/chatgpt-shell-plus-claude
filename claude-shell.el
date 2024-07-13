@@ -1765,7 +1765,6 @@ For example:
 
 (defun claude-shell--extract-claude-response (input)
   "Extract Claude response from Server-Sent Events (SSE) input."
-  (message "INSIDE claude-shell--extract-claude-response")
   ; (message "Input: %S" input)
   
   (let ((response ""))
@@ -1781,7 +1780,6 @@ For example:
                          (string= (alist-get 'type .delta) "text_delta"))
                 (setq response (concat response (alist-get 'text .delta)))))))))
   
-  (message "Extracted response: %S" response)
   response))
 
 ;; FIXME: Make shell agnostic or move to claude-shell.
@@ -2866,7 +2864,6 @@ response and feeds it to CALLBACK or ERROR-CALLBACK accordingly."
            (accumulated-output "")
            (last-response-length 0)
            (process-connection-type nil))
-      (message "Command: %S" command)
       (when request-process
         (setq shell-maker--request-process request-process)
         (shell-maker--write-output-to-log-buffer "// Request\n\n" config)
@@ -2876,7 +2873,6 @@ response and feeds it to CALLBACK or ERROR-CALLBACK accordingly."
          request-process
          (lambda (process output)
            (setq accumulated-output (concat accumulated-output output))
-           ; (message "Received output: %S" output)
            (condition-case nil
                (when (and (eq request-id (with-current-buffer buffer
                                            (shell-maker--current-request-id)))
@@ -2893,7 +2889,6 @@ response and feeds it to CALLBACK or ERROR-CALLBACK accordingly."
         (set-process-sentinel
          request-process
          (lambda (process _event)
-           ; (message "Process event: %s" _event)
            (condition-case nil
                (let ((active (and (eq request-id (with-current-buffer buffer
                                                    (shell-maker--current-request-id)))
@@ -2906,14 +2901,10 @@ response and feeds it to CALLBACK or ERROR-CALLBACK accordingly."
                   (format "Exit status: %d\n\n" exit-status) config)
                  (shell-maker--write-output-to-log-buffer output config)
                  (shell-maker--write-output-to-log-buffer "\n\n" config)
-                 ; (message "Final raw output: %S" output)
                  (with-current-buffer buffer
                    (if (= exit-status 0)
                        (let ((final-content ""))
-                         (message "Final extracted content: %s" final-content)
-                         (funcall callback final-content nil)
-                         
-                         )
+                         (funcall callback final-content nil))
                      (funcall error-callback output))))
              (kill-buffer output-buffer)
              (error (delete-process process)))))))))
