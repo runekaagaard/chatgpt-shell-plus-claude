@@ -693,73 +693,82 @@ NO-ANNOUNCEMENT skips announcing response when in background."
   "Run shell COMMAND asynchronously.
 Set STREAMING to enable it.  Calls RESPONSE-EXTRACTOR to extract the
 response and feeds it to CALLBACK or ERROR-CALLBACK accordingly."
-  (if (null shell-maker--config)
-      (error "shell-maker--config is nil. Make sure it's properly initialized.")
-    (let* ((buffer (shell-maker-buffer shell-maker--config))
-           (request-id (shell-maker--increment-request-id))
-           (output-buffer (generate-new-buffer " *temp*"))
-           (config shell-maker--config)
-           (request-process (condition-case err
-                                (apply #'start-process (append (list
-                                                                (shell-maker-buffer-name shell-maker--config)
-                                                                (buffer-name output-buffer))
-                                                               command))
-                              (error
-                               (with-current-buffer buffer
-                                 (funcall error-callback (error-message-string err)))
-                               nil)))
-           (accumulated-output "")
-           (last-response-length 0)
-           (process-connection-type nil))
-      (message "Command: %S" command)
-      (when request-process
-        (setq shell-maker--request-process request-process)
-        (shell-maker--write-output-to-log-buffer "// Request\n\n" config)
-        (shell-maker--write-output-to-log-buffer (string-join command " ") config)
-        (shell-maker--write-output-to-log-buffer "\n\n" config)
+  (let* ((buffer (shell-maker-buffer shell-maker--config))
+         (request-id (shell-maker--increment-request-id))
+         (output-buffer (generate-new-buffer " *temp*"))
+         (config shell-maker--config)
+         (request-process (condition-case err
+                              (apply #'start-process (append (list
+                                                              (shell-maker-buffer-name shell-maker--config)
+                                                              (buffer-name output-buffer))
+                                                             command))
+                            (error
+                             (with-current-buffer buffer
+                               (funcall error-callback (error-message-string err)))
+                             nil)))
+         (preparsed)
+         (remaining-text)
+         (process-connection-type nil))
+    (when request-process
+      (setq shell-maker--request-process request-process)
+      (shell-maker--write-output-to-log-buffer "// Request\n\n" config)
+      (shell-maker--write-output-to-log-buffer (string-join command " ") config)
+      (shell-maker--write-output-to-log-buffer "\n\n" config)
+      (when streaming
         (set-process-filter
          request-process
          (lambda (process output)
-           (setq accumulated-output (concat accumulated-output output))
-           (message "Received output: %S" output)
            (condition-case nil
                (when (and (eq request-id (with-current-buffer buffer
                                            (shell-maker--current-request-id)))
                           (buffer-live-p buffer))
                  (shell-maker--write-output-to-log-buffer
                   (format "// Filter output\n\n%s\n\n" output) config)
-                 (let* ((full-response (funcall response-extractor accumulated-output))
-                        (new-content (substring full-response last-response-length)))
-                   (setq last-response-length (length full-response))
-                   (when (not (string-empty-p new-content))
-                     (with-current-buffer buffer
-                       (funcall callback new-content t)))))
-             (error (delete-process process)))))
-        (set-process-sentinel
-         request-process
-         (lambda (process _event)
-           (message "Process event: %s" _event)
-           (condition-case nil
-               (let ((active (and (eq request-id (with-current-buffer buffer
-                                                   (shell-maker--current-request-id)))
-                                  (buffer-live-p buffer)))
-                     (output accumulated-output)
-                     (exit-status (process-exit-status process)))
-                 (shell-maker--write-output-to-log-buffer
-                  (format "// Response (%s)\n\n" (if active "active" "inactive")) config)
-                 (shell-maker--write-output-to-log-buffer
-                  (format "Exit status: %d\n\n" exit-status) config)
-                 (shell-maker--write-output-to-log-buffer output config)
-                 (shell-maker--write-output-to-log-buffer "\n\n" config)
-                 (message "Final raw output: %S" output)
-                 (with-current-buffer buffer
-                   (if (= exit-status 0)
-                       (let ((final-content (funcall response-extractor output)))
-                         (message "Final extracted content: %s" final-content)
-                         (funcall callback final-content nil))
-                     (funcall error-callback output))))
-             (kill-buffer output-buffer)
-             (error (delete-process process)))))))))
+                 (setq remaining-text (concat remaining-text output))
+                 (setq preparsed (shell-maker--preparse-json remaining-text))
+                 (if (car preparsed)
+                     (mapc (lambda (obj)
+                             (with-current-buffer buffer
+                               (funcall callback (funcall response-extractor obj) t)))
+                           (car preparsed))
+                   (with-current-buffer buffer
+                     (let ((curl-exit-code (shell-maker--curl-exit-status-from-error-string (cdr preparsed))))
+                       (cond ((eq 0 curl-exit-code)
+                              (funcall callback (cdr preparsed) t))
+                             ((numberp curl-exit-code)
+                              (funcall error-callback (string-trim (cdr preparsed))))))))
+                 (setq remaining-text (cdr preparsed)))
+             (error (delete-process process))))))
+      (set-process-sentinel
+       request-process
+       (lambda (process _event)
+         (condition-case nil
+             (let ((active (and (eq request-id (with-current-buffer buffer
+                                                 (shell-maker--current-request-id)))
+                                (buffer-live-p buffer)))
+                   (output (with-current-buffer (process-buffer process)
+                             (buffer-string)))
+                   (exit-status (process-exit-status process)))
+               (shell-maker--write-output-to-log-buffer
+                (format "// Response (%s)\n\n" (if active "active" "inactive")) config)
+               (shell-maker--write-output-to-log-buffer
+                (format "Exit status: %d\n\n" exit-status) config)
+               (shell-maker--write-output-to-log-buffer output config)
+               (shell-maker--write-output-to-log-buffer "\n\n" config)
+               (with-current-buffer buffer
+                 (if (= exit-status 0)
+                     (funcall callback
+                              (if (string-empty-p (string-trim output))
+                                  output
+                                (funcall response-extractor output))
+                              nil)
+                   (if-let ((error (if (string-empty-p (string-trim output))
+                                       output
+                                     (funcall response-extractor output))))
+                       (funcall error-callback error)
+                     (funcall error-callback output)))))
+           (kill-buffer output-buffer)
+           (error (delete-process process))))))))
 
 (defun shell-maker--json-parse-string-filtering (json regexp)
   "Attempt to parse JSON.  If unsuccessful, attempt after removing REGEXP."
