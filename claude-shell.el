@@ -1764,23 +1764,34 @@ For example:
   "State of the current Claude response processing.")
 
 (defun claude-shell--extract-claude-response (input)
-  "Extract Claude response from Server-Sent Events (SSE) input."
-  ; (message "Input: %S" input)
-  
-  (let ((response ""))
-    (dolist (line (split-string input "\n" t))
-      (when (string-prefix-p "data:" line)
-        (let* ((json-string (string-trim (substring line 5)))
-               (json-object (condition-case nil
-                                (json-parse-string json-string :object-type 'alist)
-                              (json-error nil))))
-          (when json-object
-            (let-alist json-object
-              (when (and (string= .type "content_block_delta")
-                         (string= (alist-get 'type .delta) "text_delta"))
-                (setq response (concat response (alist-get 'text .delta)))))))))
-  
-  response))
+  "Extract Claude response from Server-Sent Events (SSE) input or full JSON response."
+  (if claude-shell-streaming
+      ;; Streaming mode: Parse SSE format
+      (let ((response ""))
+        (dolist (line (split-string input "\n" t))
+          (when (string-prefix-p "data:" line)
+            (let* ((json-string (string-trim (substring line 5)))
+                   (json-object (condition-case nil
+                                    (json-parse-string json-string :object-type 'alist)
+                                  (json-error nil))))
+              (when json-object
+                (let-alist json-object
+                  (when (and (string= .type "content_block_delta")
+                             (string= (alist-get 'type .delta) "text_delta"))
+                    (setq response (concat response (alist-get 'text .delta)))))))))
+        response)
+    ;; Non-streaming mode: Parse full JSON response
+    (let* ((json-object (condition-case nil
+                            (json-parse-string input :object-type 'alist)
+                          (json-error nil)))
+           (content (alist-get 'content json-object)))
+      (if content
+          (let ((text-content ""))
+            (seq-doseq (item content)
+              (when (equal (alist-get 'type item) "text")
+                (setq text-content (concat text-content (alist-get 'text item)))))
+            text-content)
+        ""))))
 
 ;; FIXME: Make shell agnostic or move to claude-shell.
 (defun claude-shell-restore-session-from-transcript ()
@@ -2844,7 +2855,7 @@ Useful if sending a request failed, perhaps from failed connectivity."
 
 (defun claude-shell-async-shell-command (command streaming response-extractor callback error-callback)
   "Run shell COMMAND asynchronously.
-Set STREAMING to enable it.  Calls RESPONSE-EXTRACTOR to extract the
+Set STREAMING to enable it. Calls RESPONSE-EXTRACTOR to extract the
 response and feeds it to CALLBACK or ERROR-CALLBACK accordingly."
   (if (null shell-maker--config)
       (error "shell-maker--config is nil. Make sure it's properly initialized.")
@@ -2862,30 +2873,33 @@ response and feeds it to CALLBACK or ERROR-CALLBACK accordingly."
                                  (funcall error-callback (error-message-string err)))
                                nil)))
            (accumulated-output "")
-           (last-response-length 0)
+           (last-processed-length 0)
            (process-connection-type nil))
       (when request-process
         (setq shell-maker--request-process request-process)
         (shell-maker--write-output-to-log-buffer "// Request\n\n" config)
         (shell-maker--write-output-to-log-buffer (string-join command " ") config)
         (shell-maker--write-output-to-log-buffer "\n\n" config)
+        
         (set-process-filter
          request-process
          (lambda (process output)
            (setq accumulated-output (concat accumulated-output output))
-           (condition-case nil
-               (when (and (eq request-id (with-current-buffer buffer
-                                           (shell-maker--current-request-id)))
-                          (buffer-live-p buffer))
-                 (shell-maker--write-output-to-log-buffer
-                  (format "// Filter output\n\n%s\n\n" output) config)
-                 (let* ((full-response (funcall response-extractor accumulated-output))
-                        (new-content (substring full-response last-response-length)))
-                   (setq last-response-length (length full-response))
-                   (when (not (string-empty-p new-content))
-                     (with-current-buffer buffer
-                       (funcall callback new-content t)))))
-             (error (delete-process process)))))
+           (when streaming
+             (condition-case nil
+                 (when (and (eq request-id (with-current-buffer buffer
+                                             (shell-maker--current-request-id)))
+                            (buffer-live-p buffer))
+                   (shell-maker--write-output-to-log-buffer
+                    (format "// Filter output\n\n%s\n\n" output) config)
+                   (let* ((processed-output (funcall response-extractor accumulated-output))
+                          (new-content (substring processed-output last-processed-length)))
+                     (setq last-processed-length (length processed-output))
+                     (when (not (string-empty-p new-content))
+                       (with-current-buffer buffer
+                         (funcall callback new-content t)))))
+               (error (delete-process process))))))
+        
         (set-process-sentinel
          request-process
          (lambda (process _event)
@@ -2893,21 +2907,25 @@ response and feeds it to CALLBACK or ERROR-CALLBACK accordingly."
                (let ((active (and (eq request-id (with-current-buffer buffer
                                                    (shell-maker--current-request-id)))
                                   (buffer-live-p buffer)))
-                     (output accumulated-output)
                      (exit-status (process-exit-status process)))
                  (shell-maker--write-output-to-log-buffer
                   (format "// Response (%s)\n\n" (if active "active" "inactive")) config)
                  (shell-maker--write-output-to-log-buffer
                   (format "Exit status: %d\n\n" exit-status) config)
-                 (shell-maker--write-output-to-log-buffer output config)
+                 (shell-maker--write-output-to-log-buffer accumulated-output config)
                  (shell-maker--write-output-to-log-buffer "\n\n" config)
                  (with-current-buffer buffer
                    (if (= exit-status 0)
-                       (let ((final-content ""))
-                         (funcall callback final-content nil))
-                     (funcall error-callback output))))
+                       (if streaming
+                           ;; For streaming, just signal completion
+                           (funcall callback "" nil)
+                         ;; For non-streaming, process and send the entire output
+                         (let ((final-content (funcall response-extractor accumulated-output)))
+                           (funcall callback final-content nil)))
+                     (funcall error-callback accumulated-output))))
              (kill-buffer output-buffer)
              (error (delete-process process)))))))))
+
 
 
 (provide 'claude-shell)
