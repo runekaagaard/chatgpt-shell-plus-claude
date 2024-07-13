@@ -57,10 +57,11 @@
 
 (defcustom claude-shell-auth-header
   (lambda ()
-    (format "Authorization: Bearer %s" (claude-shell-anthropic-key)))
-  "Function to generate the request's `Authorization' header string."
+    (concat (format "x-api-key: %s" (claude-shell-anthropic-key))
+            "\nanthropic-version: 2023-06-01"))
+  "Function to generate the request's header string for Claude."
   :type '(function :tag "Function")
-  :group 'claude-shell)
+  :group 'chatgpt-shell)
 
 (defcustom claude-shell-request-timeout 600
   "How long to wait for a request to time out in seconds."
@@ -209,7 +210,7 @@ Can be used compile or run source block at point."
   :group 'claude-shell)
 
 (defcustom claude-shell-model-versions
-  '("gpt-4o" "claude-3-5-sonnet-20240620"
+  '("claude-3-5-sonnet-20240620"
     "claude-3-opus-20240229"
     "claude-3-sonnet-20240229"
     "claude-3-haiku-20240307")
@@ -466,7 +467,7 @@ window."
                  (function :tag "Function"))
   :group 'claude-shell)
 
-(defcustom claude-shell-api-url-base "https://api.openai.com"
+(defcustom claude-shell-api-url-base "https://api.anthropic.com"
   "Anthropic API's base URL.
 
 `claude-shell--api-url' =
@@ -477,7 +478,7 @@ If you use Claude through a proxy service, change the URL base."
   :safe #'stringp
   :group 'claude-shell)
 
-(defcustom claude-shell-api-url-path "/v1/chat/completions"
+(defcustom claude-shell-api-url-path "/v1/messages"
   "Anthropic API's URL path.
 
 `claude-shell--api-url' =
@@ -1690,34 +1691,36 @@ For example:
                   "--no-progress-meter"
                   "-m" (number-to-string claude-shell-request-timeout)
                   "-H" "Content-Type: application/json; charset=utf-8"
+                  "--http1.1"
                   "-H" (funcall claude-shell-auth-header)
                   "-d" (format "@%s" json-path)))))
 
 (defun claude-shell--make-payload (history)
   "Create the request payload from HISTORY."
-  (setq history
-        (vconcat ;; Vector for json
-         (claude-shell--user-assistant-messages
-          (last history
-                (claude-shell--unpaired-length
-                 (if (functionp claude-shell-transmitted-context-length)
-                     (funcall claude-shell-transmitted-context-length
-                              (claude-shell-model-version) history)
-                   claude-shell-transmitted-context-length))))))
-  ;; TODO: Use `claude-shell-make-request-data'.
-  (let ((request-data `((model . ,(claude-shell-model-version))
-                        (messages . ,(if (claude-shell-system-prompt)
-                                         (vconcat ;; Vector for json
-                                          (list
-                                           (list
-                                            (cons 'role "system")
-                                            (cons 'content (claude-shell-system-prompt))))
-                                          history)
-                                       history)))))
+  (let* ((history-vector
+          (vconcat
+           (claude-shell--user-assistant-messages
+            (last history (claude-shell--unpaired-length
+                           (if (functionp claude-shell-transmitted-context-length)
+                               (funcall claude-shell-transmitted-context-length (claude-shell-model-version) history)
+                             claude-shell-transmitted-context-length))))))
+         (request-data
+          `((model . ,(claude-shell-model-version))
+            (messages . ,history-vector)
+            (max_tokens . 4096))))  ; Added max_tokens field
+    
+    ;; Add system message as a top-level field if present
+    (when (claude-shell-system-prompt)
+      (push `(system . ,(claude-shell-system-prompt)) request-data))
+    
+    ;; Add temperature if set
     (when claude-shell-model-temperature
       (push `(temperature . ,claude-shell-model-temperature) request-data))
+    
+    ;; Add streaming option if set
     (when claude-shell-streaming
       (push `(stream . t) request-data))
+    
     request-data))
 
 (defun claude-shell--approximate-context-length (model messages)
