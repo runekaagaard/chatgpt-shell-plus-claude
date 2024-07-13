@@ -423,7 +423,7 @@ Downloaded from https://github.com/f/awesome-claude-prompts."
   (claude-shell--update-prompt t)
   (claude-shell-interrupt nil))
 
-(defcustom claude-shell-streaming t
+(defcustom claude-shell-streaming nil
   "Whether or not to stream responses (show chunks as they arrive)."
   :type 'boolean
   :group 'claude-shell)
@@ -1757,25 +1757,42 @@ For example:
     num-tokens))
 
 (defun claude-shell--extract-claude-response (json)
-  "Extract Claude response from JSON."
+  "Extract Claude response from JSON, handling both streaming and non-streaming formats."
   (if (eq (type-of json) 'cons)
       (let-alist json ;; already parsed
-        (or (unless (seq-empty-p .choices)
-              (let-alist (seq-first .choices)
-                (or .delta.content
-                    .message.content)))
-            .error.message
-            ""))
+        (cond
+         ;; Streaming response - content block delta
+         ((string= .type "content_block_delta")
+          (let-alist .delta
+            (cond
+             ((string= .type "text_delta") .text)
+             ((string= .type "input_json_delta") .partial_json)
+             (t ""))))
+         ;; Streaming response - message start
+         ((string= .type "message_start")
+          "")  ; Return empty string, actual content will come in deltas
+         ;; Streaming response - message delta (e.g., stop reason)
+         ((string= .type "message_delta")
+          "")  ; Typically doesn't contain content to display
+         ;; Non-streaming response
+         (.content
+          (let-alist (seq-first .content)
+            (or .text "")))
+         ;; Error message
+         (.error
+          (or .error.message "An error occurred"))
+         ;; Default case
+         (t "")))
+    ;; JSON is a string, need to parse
     (if-let (parsed (shell-maker--json-parse-string json))
-        (string-trim
-         (let-alist parsed
-           (unless (seq-empty-p .choices)
-             (let-alist (seq-first .choices)
-               .message.content))))
+        (claude-shell--extract-claude-response parsed)  ; Recurse with parsed JSON
+      ;; Parsing failed, try to extract error message
       (if-let (parsed-error (shell-maker--json-parse-string-filtering
                              json "^curl:.*\n?"))
           (let-alist parsed-error
-            .error.message)))))
+            (or .error.message "An error occurred"))
+        ;; If all else fails, return empty string
+        ""))))
 
 ;; FIXME: Make shell agnostic or move to claude-shell.
 (defun claude-shell-restore-session-from-transcript ()
