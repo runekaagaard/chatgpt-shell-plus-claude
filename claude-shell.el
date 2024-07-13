@@ -61,7 +61,7 @@
             "\nanthropic-version: 2023-06-01"))
   "Function to generate the request's header string for Claude."
   :type '(function :tag "Function")
-  :group 'chatgpt-shell)
+  :group 'claude-shell)
 
 (defcustom claude-shell-request-timeout 600
   "How long to wait for a request to time out in seconds."
